@@ -6,6 +6,8 @@
 
 ## 功能
 
+- **模型明细**（v1.1）：每个账号可调 fetchAvailableModels 列出每个模型的剩余额度与重置时间；订阅档改走上游同款 loadCodeAssist 端点顺序与请求体
+
 - 账号列表：每行显示邮箱、备注、订阅档、Gemini 周额度剩余 %、Claude/GPT 周额度剩余 %、5 小时额度、重置时间，以及「当前」标记
 - 添加账号（三种方式，见下）
 - 单个「刷新额度」/ 顶部「全部刷新」：refresh token 换 access token → loadCodeAssist 拿 project_id 和订阅档（失败不阻塞）→ retrieveUserQuotaSummary 查两个额度分组（Gemini、Claude and GPT models），结果缓存到本地

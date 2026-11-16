@@ -277,6 +277,12 @@ public class MainActivity extends Activity {
         row.addView(makeButton("删除", v -> confirmDelete(a)), wrapParams());
         card.addView(row);
 
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.setGravity(Gravity.START);
+        row2.addView(makeButton("模型明细", v -> showModelDetails(a)), wrapParams());
+        card.addView(row2);
+
         return card;
     }
 
@@ -466,36 +472,138 @@ public class MainActivity extends Activity {
         if (!name.isEmpty()) a.name = name;
     }
 
-    /** loadCodeAssist：拿 project_id 与订阅档。失败不抛异常，只记录（不阻塞额度）。 */
+    /** loadCodeAssist：拿 project_id 与订阅档。与上游一致：端点顺序 sandbox→daily→正式，
+     *  请求体只带 {"metadata":{"ideType":"ANTIGRAVITY"}}。失败不抛异常（不阻塞额度）。 */
     private void fetchTierAndProject(Account a) {
+        String[] urls = {
+                "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:loadCodeAssist",
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+                LOAD_CODE_ASSIST_URL
+        };
         try {
             JSONObject meta = new JSONObject();
             meta.put("ideType", "ANTIGRAVITY");
-            meta.put("platform", "PLATFORM_UNSPECIFIED");
-            meta.put("pluginType", "GEMINI");
             JSONObject body = new JSONObject();
             body.put("metadata", meta);
-            body.put("mode", "PROJECT");
-            HttpResult r = httpPostJson(LOAD_CODE_ASSIST_URL, body.toString(), a.accessToken);
-            if (r.code != 200) return;
-            JSONObject o = new JSONObject(r.body);
-            // cloudaicompanionProject 可能是字符串，也可能是 {id: "..."}
-            Object proj = o.opt("cloudaicompanionProject");
-            if (proj instanceof String && !((String) proj).isEmpty()) {
-                a.projectId = (String) proj;
-            } else if (proj instanceof JSONObject) {
-                String pid = ((JSONObject) proj).optString("id", "");
-                if (!pid.isEmpty()) a.projectId = pid;
+            for (String u : urls) {
+                HttpResult r;
+                try {
+                    r = httpPostJson(u, body.toString(), a.accessToken);
+                } catch (Exception e) {
+                    continue;
+                }
+                if (r.code != 200) continue;
+                JSONObject o = new JSONObject(r.body);
+                // cloudaicompanionProject 可能是字符串，也可能是 {id: "..."}
+                Object proj = o.opt("cloudaicompanionProject");
+                if (proj instanceof String && !((String) proj).isEmpty()) {
+                    a.projectId = (String) proj;
+                } else if (proj instanceof JSONObject) {
+                    String pid = ((JSONObject) proj).optString("id", "");
+                    if (!pid.isEmpty()) a.projectId = pid;
+                }
+                String tierName = tierLabel(o.optJSONObject("paidTier"));
+                if (tierName.isEmpty()) tierName = tierLabel(o.optJSONObject("currentTier"));
+                if (tierName.isEmpty()) {
+                    JSONArray allowed = o.optJSONArray("allowedTiers");
+                    if (allowed != null) {
+                        for (int i = 0; i < allowed.length(); i++) {
+                            JSONObject t = allowed.optJSONObject(i);
+                            if (t != null && t.optBoolean("isDefault", false)) {
+                                tierName = tierLabel(t);
+                                if (!tierName.isEmpty()) break;
+                            }
+                        }
+                    }
+                }
+                if (!tierName.isEmpty()) a.tier = tierName;
+                return;
             }
-            JSONObject paid = o.optJSONObject("paidTier");
-            JSONObject cur = o.optJSONObject("currentTier");
-            String tierName = "";
-            if (paid != null) tierName = paid.optString("name", "");
-            if (tierName.isEmpty() && cur != null) tierName = cur.optString("name", "");
-            if (!tierName.isEmpty()) a.tier = tierName;
         } catch (Exception ignored) {
             // 订阅档拿不到不阻塞主流程
         }
+    }
+
+    private String tierLabel(JSONObject tier) {
+        if (tier == null) return "";
+        String s = tier.optString("name", "");
+        if (s.isEmpty()) s = tier.optString("id", "");
+        return s.trim();
+    }
+
+    /** 模型明细：fetchAvailableModels，列出每个模型的剩余额度与重置时间（上游桌面版同源数据）。 */
+    private void showModelDetails(final Account a) {
+        toast("正在拉取 " + a.displayName() + " 的模型明细…");
+        executor.execute(() -> {
+            String text;
+            try {
+                refreshAccessToken(a);
+                JSONObject body = new JSONObject();
+                if (a.projectId != null && !a.projectId.isEmpty()) body.put("project", a.projectId);
+                String[] urls = {
+                        "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+                        "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+                        "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels"
+                };
+                HttpResult r = null;
+                for (String u : urls) {
+                    try {
+                        r = httpPostJson(u, body.toString(), a.accessToken);
+                        if (r.code == 200) break;
+                    } catch (Exception e) {
+                        r = null;
+                    }
+                }
+                if (r == null || r.code != 200) {
+                    throw new Exception("拉模型列表失败" + (r != null ? " HTTP " + r.code + "：" + brief(r.body) : "（网络）"));
+                }
+                JSONObject o = new JSONObject(r.body);
+                JSONObject models = o.optJSONObject("models");
+                if (models == null) throw new Exception("响应里没有 models 字段");
+                java.util.List<String[]> rows = new java.util.ArrayList<>();
+                java.util.Iterator<String> keys = models.keys();
+                while (keys.hasNext()) {
+                    String id = keys.next();
+                    JSONObject info = models.optJSONObject(id);
+                    if (info == null) continue;
+                    JSONObject qi = info.optJSONObject("quotaInfo");
+                    if (qi == null) continue;
+                    double frac = qi.optDouble("remainingFraction", -1);
+                    String reset = qi.optString("resetTime", "");
+                    String name = info.optString("displayName", "");
+                    if (name.isEmpty()) name = id;
+                    rows.add(new String[]{name, id, String.valueOf(frac), reset});
+                }
+                rows.sort((x, y) -> x[0].compareToIgnoreCase(y[0]));
+                StringBuilder sb = new StringBuilder();
+                sb.append("共 ").append(rows.size()).append(" 个有额度信息的模型。\n")
+                  .append("注：同池模型共用额度，百分比通常相同；Argon/Carbon 等独立池会单独显示。\n");
+                for (String[] row : rows) {
+                    double f = Double.parseDouble(row[2]);
+                    sb.append("\n").append(row[0]);
+                    if (!row[1].equals(row[0])) sb.append("（").append(row[1]).append("）");
+                    sb.append("\n  剩余 ").append(f >= 0 ? pct(f) + "%" : "未知");
+                    if (!row[3].isEmpty()) sb.append("，重置 ").append(shortTime(row[3]));
+                }
+                text = sb.toString();
+            } catch (Exception e) {
+                text = "拉取失败：" + e.getMessage();
+            }
+            final String shown = text;
+            runOnUiThread(() -> {
+                TextView tv = new TextView(this);
+                tv.setText(shown);
+                tv.setTextSize(13);
+                tv.setPadding(dp(20), dp(12), dp(20), dp(12));
+                ScrollView sv = new ScrollView(this);
+                sv.addView(tv);
+                new AlertDialog.Builder(this)
+                        .setTitle("模型明细 · " + a.displayName())
+                        .setView(sv)
+                        .setPositiveButton("关闭", null)
+                        .show();
+            });
+        });
     }
 
     /** retrieveUserQuotaSummary：解析两个分组的周额度与 5 小时额度，缓存进账号 */

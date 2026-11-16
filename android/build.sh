@@ -33,8 +33,8 @@ echo "== 1/6 aapt2 link（纯代码 UI，无 res，只打包 Manifest）=="
     -I "$ANDROID_JAR" \
     --min-sdk-version 26 \
     --target-sdk-version 35 \
-    --version-code 1 \
-    --version-name "1.0"
+    --version-code 2 \
+    --version-name "1.1"
 
 echo "== 2/6 javac =="
 find "$SRC_DIR" -name "*.java" > "$BUILD_DIR/sources.txt"
